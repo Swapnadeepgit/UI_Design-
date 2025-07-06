@@ -1,0 +1,314 @@
+(() => {
+  window.duet =
+    window.duet ||
+    (function () {
+      const iframe = document.createElement("iframe"); // private
+      let isLoaded = false;
+      let initialSize = { width: 500, height: 700 }; // Save initial size
+
+      const sendMessageSafely = (message) => {
+        if (isLoaded) {
+          iframe.contentWindow.postMessage(message, "https://decagon.ai");
+        } else {
+          window.addEventListener(
+            "decagonload",
+            () => {
+              iframe.contentWindow.postMessage(message, "https://decagon.ai");
+            },
+            { once: true },
+          );
+        }
+      };
+
+      const callbacks = {
+        onMetadataRequest: null, // Stores user's callback for REQUEST_METADATA
+      };
+
+      const processMetadataResponse = async (response) => {
+        try {
+          if (response.ok) {
+            sendMessageSafely({
+              metadataRequestResult: { data: response, ok: true },
+            });
+            return;
+          }
+
+          const errorType = [401, 403].includes(response.status)
+            ? "NOT_LOGGED_IN"
+            : "UNKNOWN_ERROR";
+
+          sendMessageSafely({
+            metadataRequestResult: { data: [], ok: false, error: errorType },
+          });
+        } catch (err) {
+          sendMessageSafely({
+            metadataRequestResult: { data: [], ok: false, error: "ERROR" },
+          });
+        }
+      };
+
+      return {
+        init: function () {
+          const loadWidget = () => {
+            iframe.allowFullscreen = true;
+            iframe.allow = "fullscreen";
+            const iframeStyle = iframe.style;
+
+            iframeStyle.boxSizing = "borderBox";
+            iframeStyle.position = "fixed";
+            iframeStyle.right = 0;
+            iframeStyle.bottom = 0;
+            iframeStyle.border = 0;
+            iframeStyle.margin = 0;
+            iframeStyle.padding = 0;
+            iframeStyle.zIndex = 99999999;
+            iframeStyle.display = "none";
+            iframeStyle.outline = "none";
+
+            initialSize.width = Math.min(window.innerWidth, initialSize.width);
+            initialSize.height = Math.min(
+              window.innerHeight,
+              initialSize.height,
+            );
+            iframeStyle.width = `${initialSize.width}px`;
+            iframeStyle.height = `${initialSize.height}px`;
+
+            iframe.addEventListener("load", () => {
+              iframe.style.display = "block";
+            });
+
+            // Basic check for mobile user agent:
+            const isMobile = /iPhone|iPad|iPod|Android|Mobile|Samsung/i.test(
+              navigator.userAgent,
+            );
+
+            // Keep track of the original overflow / margins so we can
+            // restore them as needed later:
+            const originalBodyOverflow = document.body.style.overflow;
+            const originalDocumentOverflow =
+              document.documentElement.style.overflow;
+            const originalBodyMarginRight = document.body.style.marginRight;
+            const originalDocumentMarginRight =
+              document.documentElement.style.marginRight;
+
+            const browserDeviceType =
+              window.innerWidth > 768 ? "desktop" : "mobile";
+
+            function restoreBrowserScrolling() {
+              document.body.style.overflow = originalBodyOverflow;
+              document.documentElement.style.overflow =
+                originalDocumentOverflow;
+
+              document.body.style.marginRight = originalBodyMarginRight;
+              document.documentElement.style.marginRight =
+                originalDocumentMarginRight;
+
+              // Force repaint of the page to ensure mobile scrolling is restored
+              document.body.style.position = "static";
+
+              setTimeout(() => {
+                document.body.style.position = "";
+              }, 0);
+            }
+
+            function toggleMenu() {
+              // Get width before hiding scrollbar
+              let oldWidth = document.body.clientWidth;
+
+              // Toggle CSS class that sets overflow to hidden
+              document.body.style.overflow = "hidden";
+              document.body.style.position = "fixed";
+              document.documentElement.style.overflow = "hidden";
+
+              // Get new width after hiding scrollbar
+              let newWidth = document.body.clientWidth;
+
+              // Set margin right value equal to width of the scrollbar
+              let scrollbarWidth = Math.max(0, newWidth - oldWidth);
+              document.body.style.marginRight = `${scrollbarWidth}px`;
+              document.documentElement.style.marginRight = `${scrollbarWidth}px`;
+            }
+
+            const widgetUrl = `https://decagon.ai/demo/figma`;
+
+            iframe.src = widgetUrl;
+            iframe.id = "decagon-iframe";
+
+            document.body.appendChild(iframe);
+            let minimizeTask = null;
+
+            window.addEventListener("message", function (e) {
+              const key = e.message ? "message" : "data";
+              const data = e[key];
+
+              if (typeof data !== "object") return;
+
+              if (data.type === "DECAGON_LOADED") {
+                if (isLoaded) return;
+                window.dispatchEvent(new CustomEvent("decagonload"));
+                isLoaded = true;
+              } else if (data.type === "DECAGON_ACTIVE") {
+                if (minimizeTask) this.clearTimeout(minimizeTask);
+
+                // Add metadata to track device type based on browser width
+                sendMessageSafely({
+                  addMetadata: { browser_device_type: browserDeviceType },
+                });
+
+                // On mobile only, disable scrolling when the chat window is opened:
+                if (isMobile) {
+                  iframe.style.width = `100%`;
+                  iframe.style.height = `100%`;
+                  toggleMenu();
+                } else {
+                  iframe.style.width = `${initialSize.width}px`;
+                  iframe.style.height = `${initialSize.height}px`;
+                }
+              } else if (data.type === "DECAGON_INACTIVE") {
+                minimizeTask = this.setTimeout(() => {
+                  iframe.style.width = data.isHidden ? "0px" : "100px";
+                  iframe.style.height = data.isHidden ? "0px" : "100px";
+                  // On mobile only, restore scroll behavior when chat window
+                  // is minimized:
+                  if (isMobile) {
+                    restoreBrowserScrolling();
+                  }
+                }, 500);
+              } else if (data.type === "DECAGON_PROACTIVE_MESSAGE") {
+                if (minimizeTask) this.clearTimeout(minimizeTask);
+                const widgetHeight = data.isHidden ? 0 : 100;
+                const widgetWidth = data.isHidden ? 0 : 100;
+                if (data.action === "open") {
+                  iframe.style.height = `${data.proactiveMessageHeight + widgetHeight}px`;
+                  iframe.style.width = `${data.proactiveMessageWidth}px`;
+                } else {
+                  iframe.style.height = `${widgetHeight}px`;
+                  iframe.style.width = `${widgetWidth}px`;
+                }
+              } else if (
+                data.type === "REQUEST_METADATA" &&
+                callbacks.onMetadataRequest
+              ) {
+                callbacks.onMetadataRequest(data.payload, async (response) => {
+                  processMetadataResponse(response);
+                });
+              }
+            });
+
+            document.addEventListener("mousemove", function (e) {
+              if (!isLoaded) return;
+
+              const coord = {
+                x: e.clientX - iframe.offsetLeft,
+                y: e.clientY - iframe.offsetTop,
+              };
+
+              iframe.contentWindow.postMessage({ coord }, "*");
+            });
+          };
+
+          if (document.readyState === "complete") {
+            loadWidget();
+          } else {
+            document.addEventListener("readystatechange", () => {
+              if (document.readyState === "complete") {
+                loadWidget();
+              }
+            });
+          }
+        },
+        addMetadata: function (metadata) {
+          sendMessageSafely({ addMetadata: metadata });
+        },
+        setMetadata: function (metadata) {
+          sendMessageSafely({ metadata });
+        },
+        setUserIdAuth: function (signature, epoch) {
+          sendMessageSafely({ userIdAuth: { signature, epoch } });
+        },
+        setUserId: function (userId) {
+          sendMessageSafely({ userId });
+        },
+        hide: function () {
+          sendMessageSafely({ hiddenMode: true });
+        },
+        unhide: function () {
+          sendMessageSafely({ hiddenMode: false });
+        },
+        open: function () {
+          sendMessageSafely({ isVisible: true });
+        },
+        close: function () {
+          sendMessageSafely({ isVisible: false });
+        },
+        setChatSessionDuration: function (durationInHours) {
+          sendMessageSafely({ chatSessionDuration: durationInHours });
+        },
+        openConversation: function (conversationId) {
+          sendMessageSafely({ conversationId });
+        },
+        setTriggerMessage: function (triggerMessage, isProactive = false) {
+          sendMessageSafely({ triggerMessage, isProactive });
+        },
+        setProactiveMessage: function (proactiveMessage) {
+          sendMessageSafely({ proactiveMessage });
+        },
+        setInitialUserMessage: function (initialUserMessage) {
+          sendMessageSafely({ initialUserMessage });
+        },
+        startNewConversation: function () {
+          sendMessageSafely({ startNewConversation: true });
+        },
+        isReady: function () {
+          return isLoaded;
+        },
+        sendMessage: function (sdkMessage) {
+          sendMessageSafely({ sdkMessage });
+        },
+        setLocalizationData: function (localizationData) {
+          sendMessageSafely({ localizationData });
+        },
+        setMetadataRequestListener: function (callback) {
+          callbacks.onMetadataRequest = callback;
+        },
+        setWidgetCornerPosition: function (cornerPosition) {
+          if (cornerPosition === "bottom-right") {
+            iframe.style.right = 0;
+            iframe.style.left = "auto";
+            sendMessageSafely({ widgetCornerPosition: "bottom-right" });
+          } else if (cornerPosition === "bottom-left") {
+            iframe.style.left = 0;
+            iframe.style.right = "auto";
+            sendMessageSafely({
+              widgetCornerPosition: "bottom-left",
+            });
+          }
+        },
+        setEventListener: function (callback) {
+          let hasReceivedInitialize = false;
+          window.addEventListener("message", function (e) {
+            const key = e.message ? "message" : "data";
+            const data = e[key];
+
+            if (
+              typeof data === "object" &&
+              data.type === "USER_ACTION" &&
+              data.payload
+            ) {
+              // Only pass the first DUET_INITIALIZE event to the callback
+              if (data.payload.eventName === "DUET_INITIALIZE") {
+                if (!hasReceivedInitialize) {
+                  hasReceivedInitialize = true;
+                  callback(data.payload);
+                }
+              } else {
+                callback(data.payload);
+              }
+            }
+          });
+        },
+      };
+    })();
+
+  window.duet.init();
+})();
